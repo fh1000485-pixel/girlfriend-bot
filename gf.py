@@ -2,46 +2,51 @@ import os
 import threading
 import requests
 import telebot
-from flask import Flask
+from flask import Flask, request
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+# Render automatically provides this; fallback is your current Render URL.
+WEBHOOK_URL = os.getenv(
+    "WEBHOOK_URL",
+    "https://faruk-gf.onrender.com"
+)
+
+GEMINI_MODEL = "gemini-2.5-flash"
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is missing")
+    raise RuntimeError("BOT_TOKEN missing")
 
 if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is missing")
+    raise RuntimeError("GEMINI_API_KEY missing")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# Recent conversation for each user
+# Recent conversation memory
 histories = {}
 
 SYSTEM_PROMPT = """
-You are Faruk GF, an intelligent ChatGPT-style Telegram assistant.
+You are Faruk GF, a ChatGPT-style intelligent Telegram AI assistant.
 
-Your job is to understand what the user actually wants and answer helpfully.
+Understand what the user actually means and answer the current question.
 
-IMPORTANT:
-- Answer the current question directly.
-- Use previous messages when they are relevant.
-- If the user changes topic, follow the new topic.
-- Never give a generic reply when a specific answer is possible.
-- Do not repeat the same answer unnecessarily.
-- You can help with general questions, explanations, writing, coding,
-  ideas, translations, calculations, and casual conversation.
+Rules:
+- Give relevant answers instead of generic replies.
+- Remember recent conversation context.
+- Follow topic changes naturally.
+- Help with general questions, coding, writing, translation,
+  ideas, explanations and casual conversation.
 - Understand Hindi, Hinglish, Urdu and English.
-- Reply naturally in the language/style the user uses.
-- Keep casual answers concise, but explain properly when the question
-  needs detail.
-- You are an AI assistant; don't claim to be a real human.
-- You can have a warm, friendly personality, but usefulness comes first.
+- Reply naturally in the user's language/style.
+- Be friendly and conversational.
+- Do not claim to be a real human.
 """
 
-def ask_ai(user_id, message):
+
+def ask_gemini(user_id, message):
+
     history = histories.setdefault(user_id, [])
 
     history.append({
@@ -49,7 +54,7 @@ def ask_ai(user_id, message):
         "parts": [{"text": message}]
     })
 
-    # Keep recent context
+    # Keep recent conversation
     history[:] = history[-20:]
 
     url = (
@@ -64,7 +69,9 @@ def ask_ai(user_id, message):
 
     payload = {
         "system_instruction": {
-            "parts": [{"text": SYSTEM_PROMPT}]
+            "parts": [
+                {"text": SYSTEM_PROMPT}
+            ]
         },
         "contents": history,
         "generationConfig": {
@@ -74,50 +81,56 @@ def ask_ai(user_id, message):
     }
 
     try:
-        r = requests.post(
+        response = requests.post(
             url,
             headers=headers,
             json=payload,
             timeout=60
         )
 
-        print("GEMINI STATUS:", r.status_code)
+        print("GEMINI STATUS:", response.status_code)
 
-        if r.status_code != 200:
-            print("GEMINI ERROR:", r.text)
+        if response.status_code != 200:
+            print("GEMINI ERROR:", response.text)
 
-            # Don't keep a failed request in memory
+            # Remove failed user message
             if history and history[-1]["role"] == "user":
                 history.pop()
 
-            return "😕 Abhi AI response nahi aa paaya. Thodi der baad try karo."
+            return "AI error: Gemini request failed."
 
-        data = r.json()
+        data = response.json()
 
         candidates = data.get("candidates", [])
 
         if not candidates:
-            print("EMPTY CANDIDATES:", data)
+            print("GEMINI EMPTY:", data)
 
             if history and history[-1]["role"] == "user":
                 history.pop()
 
-            return "😕 Mujhe abhi proper response nahi mila."
+            return "AI ne koi response nahi diya."
 
-        parts = candidates[0].get("content", {}).get("parts", [])
+        parts = candidates[0].get(
+            "content", {}
+        ).get("parts", [])
 
-        answer = "".join(
-            part.get("text", "")
-            for part in parts
-        ).strip()
+        answer = ""
+
+        for part in parts:
+            text = part.get("text")
+            if text:
+                answer += text
+
+        answer = answer.strip()
 
         if not answer:
-            print("EMPTY ANSWER:", data)
+            print("GEMINI EMPTY TEXT:", data)
 
             if history and history[-1]["role"] == "user":
                 history.pop()
 
-            return "😕 Reply generate nahi ho paya."
+            return "AI response empty tha."
 
         history.append({
             "role": "model",
@@ -126,86 +139,140 @@ def ask_ai(user_id, message):
 
         return answer
 
-    except requests.exceptions.Timeout:
-        if history and history[-1]["role"] == "user":
-            history.pop()
-        return "⏳ AI response mein thoda time lag raha hai. Dobara try karo."
-
     except Exception as e:
-        print("AI EXCEPTION:", repr(e))
+
+        print("GEMINI EXCEPTION:", repr(e))
 
         if history and history[-1]["role"] == "user":
             history.pop()
 
-        return "😕 Technical problem aa gayi. Dobara try karo."
+        return "AI connection error."
 
+
+# =========================
+# TELEGRAM COMMANDS
+# =========================
 
 @bot.message_handler(commands=["start"])
 def start(message):
+
     bot.reply_to(
         message,
         "Hey 👋❤️ Main Faruk GF hoon.\n\n"
-        "Mujhse kisi bhi topic par baat karo — questions, coding, "
-        "writing, ideas ya normal chat. Main context ke according reply karungi. 😊\n\n"
-        "Chat reset: /clear"
+        "Tum mujhse kisi bhi topic par baat kar sakte ho — "
+        "questions, coding, writing, ideas ya normal chat. 😊\n\n"
+        "/clear — chat memory clear"
     )
 
 
 @bot.message_handler(commands=["clear"])
 def clear(message):
+
     histories.pop(message.from_user.id, None)
-    bot.reply_to(message, "🧹 Recent chat memory clear ho gayi.")
+
+    bot.reply_to(
+        message,
+        "🧹 Recent conversation memory clear ho gayi."
+    )
 
 
 @bot.message_handler(func=lambda message: True)
 def chat(message):
+
     if not message.text:
         return
 
-    user_id = message.from_user.id
-
-    # Telegram typing indicator
     try:
-        bot.send_chat_action(message.chat.id, "typing")
+        bot.send_chat_action(
+            message.chat.id,
+            "typing"
+        )
     except Exception:
         pass
 
-    answer = ask_ai(user_id, message.text)
+    answer = ask_gemini(
+        message.from_user.id,
+        message.text
+    )
 
-    bot.reply_to(message, answer)
+    bot.reply_to(
+        message,
+        answer
+    )
 
 
-@app.route("/")
+# =========================
+# WEBHOOK
+# =========================
+
+@app.route("/", methods=["GET"])
 def home():
-    return "Faruk GF AI is running ❤️"
+    return "Faruk GF AI is LIVE ❤️"
 
 
-@app.route("/health")
+@app.route("/health", methods=["GET"])
 def health():
     return "OK"
 
 
-def run_bot():
+@app.route("/telegram-webhook", methods=["POST"])
+def telegram_webhook():
+
+    try:
+        update = telebot.types.Update.de_json(
+            request.get_data().decode("utf-8")
+        )
+
+        # Process in background so Telegram gets HTTP 200 quickly
+        threading.Thread(
+            target=bot.process_new_updates,
+            args=([update],),
+            daemon=True
+        ).start()
+
+        return "OK", 200
+
+    except Exception as e:
+
+        print("WEBHOOK ERROR:", repr(e))
+
+        return "ERROR", 500
+
+
+def set_webhook():
+
+    webhook = WEBHOOK_URL.rstrip("/") + "/telegram-webhook"
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+
+    try:
+
+        response = requests.post(
+            url,
+            json={
+                "url": webhook,
+                "drop_pending_updates": True
+            },
+            timeout=20
+        )
+
+        print("WEBHOOK SET:", response.status_code)
+        print("WEBHOOK RESPONSE:", response.text)
+
+    except Exception as e:
+
+        print("WEBHOOK SET ERROR:", repr(e))
+
+
+# =========================
+# START SERVER
+# =========================
+
+if __name__ == "__main__":
+
     print("================================")
-    print("❤️ FARUK GF AI BOT STARTED")
+    print("❤️ FARUK GF AI WEBHOOK BOT")
     print("Model:", GEMINI_MODEL)
     print("================================")
 
-    bot.infinity_polling(
-        timeout=60,
-        long_polling_timeout=60
-    )
-
-
-if __name__ == "__main__":
-    threading.Thread(
-        target=run_bot,
-        daemon=True
-    ).start()
-
-    port = int(os.getenv("PORT", "10000"))
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    #

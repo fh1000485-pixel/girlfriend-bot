@@ -1,233 +1,135 @@
 import os
 import threading
-import telebot
 import requests
+import telebot
 from flask import Flask
 
-# ==============================
-# ENVIRONMENT VARIABLES
-# ==============================
-
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-
-# ==============================
-# BOT SETUP
-# ==============================
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 bot = telebot.TeleBot(BOT_TOKEN)
-
-# User-wise conversation history
-user_history = {}
-
-# ==============================
-# FLASK SERVER FOR RENDER
-# ==============================
-
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "Faruk GF AI Bot is running ❤️", 200
-
-@app.route("/health")
-def health():
-    return "OK", 200
-
-# ==============================
-# AI PERSONALITY
-# ==============================
+user_history = {}
 
 SYSTEM_PROMPT = """
 You are Faruk GF, a friendly virtual girlfriend chatbot.
 
-Talk naturally and warmly with the user.
-
-IMPORTANT:
-- Understand exactly what the user is talking about.
-- Reply according to the current topic.
-- Never give the same generic reply repeatedly.
+Rules:
+- Understand the user's current topic and reply directly to it.
+- Never repeat generic replies.
 - Remember recent conversation context.
-- If the user changes the topic, follow the new topic.
-- The user can speak Hindi, Hinglish, Urdu or English.
-- Reply in the same language/style the user uses.
-- Keep replies natural and conversational.
+- Follow topic changes naturally.
+- Support Hindi, Hinglish, Urdu and English.
+- Reply in the same language/style as the user.
+- Keep replies natural, friendly and conversational.
 - Use emojis naturally, but don't overuse them.
-- Do not claim to be a real human.
+- Never claim to be a real human.
 """
 
-# ==============================
-# ASK AI
-# ==============================
+def ask_gemini(user_id, message):
+    history = user_history.setdefault(user_id, [])
 
-def ask_ai(user_id, message):
-
-    if user_id not in user_history:
-        user_history[user_id] = []
-
-    user_history[user_id].append({
+    history.append({
         "role": "user",
-        "content": message
+        "parts": [{"text": message}]
     })
 
-    # Keep recent conversation
-    user_history[user_id] = user_history[user_id][-20:]
+    # Keep recent conversation only
+    history[:] = history[-12:]
+
+    url = (
+        "https://generativelanguage.googleapis.com/"
+        "v1beta/models/gemini-2.5-flash:generateContent"
+    )
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENAI_API_KEY}"
+        "x-goog-api-key": GEMINI_API_KEY
     }
 
     data = {
-        "model": "gpt-5.6-luna",
-        "instructions": SYSTEM_PROMPT,
-        "input": user_history[user_id]
+        "system_instruction": {
+            "parts": [{"text": SYSTEM_PROMPT}]
+        },
+        "contents": history
     }
 
+    response = requests.post(
+        url,
+        headers=headers,
+        json=data,
+        timeout=60
+    )
+
+    if response.status_code != 200:
+        print("GEMINI ERROR:", response.status_code, response.text)
+        return "Sorry 😅 Abhi AI se connection mein problem aa gayi. Thodi der baad try karo ❤️"
+
+    result = response.json()
+
     try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers=headers,
-            json=data,
-            timeout=60
-        )
+        reply = result["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError):
+        print("GEMINI RESPONSE ERROR:", result)
+        return "Sorry 😅 Mujhe reply generate karne mein problem hui ❤️"
 
-        if response.status_code != 200:
-            print("OPENAI ERROR:")
-            print(response.text)
-            return "Sorry 😅 AI connection mein problem aa gayi. Thodi der baad try karo ❤️"
+    history.append({
+        "role": "model",
+        "parts": [{"text": reply}]
+    })
 
-        result = response.json()
+    return reply
 
-        reply = result.get("output_text", "")
-
-        if not reply:
-            for item in result.get("output", []):
-                if item.get("type") == "message":
-                    for content in item.get("content", []):
-                        if content.get("type") == "output_text":
-                            reply += content.get("text", "")
-
-        if not reply:
-            reply = "Hmm ❤️ Mujhe samajh nahi aaya, dobara batao."
-
-        user_history[user_id].append({
-            "role": "assistant",
-            "content": reply
-        })
-
-        return reply
-
-    except requests.exceptions.Timeout:
-        return "AI ko response dene mein thoda time lag raha hai 😅 Dobara try karo ❤️"
-
-    except Exception as e:
-        print("AI ERROR:", e)
-        return "Oops 😅 Kuch technical problem aa gayi."
-
-
-# ==============================
-# START
-# ==============================
 
 @bot.message_handler(commands=["start"])
 def start(message):
-
-    user_id = message.from_user.id
-    name = message.from_user.first_name or "Friend"
-
-    user_history[user_id] = []
-
-    bot.send_message(
-        message.chat.id,
-        f"Hey {name} 🥰❤️\n\n"
-        "Main Faruk GF hoon 💕\n\n"
-        "Tum mujhse Hindi, Hinglish, Urdu ya English "
-        "mein kisi bhi topic par baat kar sakte ho 😘\n\n"
-        "Bolo, aaj kya baat karein? ❤️"
+    bot.reply_to(
+        message,
+        "Hey 🥰❤️ Main Faruk GF hoon!\n"
+        "Mujhse normally baat karo, main tumhari baat ke according reply karungi."
     )
 
-
-# ==============================
-# CLEAR MEMORY
-# ==============================
 
 @bot.message_handler(commands=["clear"])
 def clear(message):
+    user_history.pop(message.from_user.id, None)
+    bot.reply_to(message, "Chat memory clear ho gayi 🧹❤️")
 
-    user_history[message.from_user.id] = []
-
-    bot.send_message(
-        message.chat.id,
-        "Chat memory clear kar di ❤️\n"
-        "Ab fresh conversation start karte hain 🥰"
-    )
-
-
-# ==============================
-# NORMAL CHAT
-# ==============================
 
 @bot.message_handler(func=lambda message: True)
 def chat(message):
-
-    if not message.text:
-        return
-
     try:
-        bot.send_chat_action(message.chat.id, "typing")
-
-        reply = ask_ai(
-            message.from_user.id,
-            message.text
-        )
-
-        bot.send_message(
-            message.chat.id,
-            reply
-        )
-
+        reply = ask_gemini(message.from_user.id, message.text)
+        bot.reply_to(message, reply)
     except Exception as e:
-        print("BOT ERROR:", e)
-
-        bot.send_message(
-            message.chat.id,
-            "Oops 😅 Kuch technical problem aa gayi."
+        print("BOT ERROR:", repr(e))
+        bot.reply_to(
+            message,
+            "Sorry 😅 Kuch technical problem aa gayi. Thodi der baad try karo ❤️"
         )
 
 
-# ==============================
-# TELEGRAM BOT
-# ==============================
+@app.route("/")
+def home():
+    return "Faruk GF is running ❤️"
+
+
+@app.route("/health")
+def health():
+    return "OK"
+
 
 def run_bot():
-    print("================================")
-    print("❤️ FARUK GF AI BOT STARTED")
-    print("================================")
-
+    print("❤️ FARUK GF GEMINI BOT STARTED")
     bot.infinity_polling(
         timeout=60,
-        long_polling_timeout=60,
-        skip_pending=True
+        long_polling_timeout=60
     )
 
-
-# ==============================
-# START BOTH SERVERS
-# ==============================
 
 if __name__ == "__main__":
-
-    bot_thread = threading.Thread(
-        target=run_bot,
-        daemon=True
-    )
-
-    bot_thread.start()
+    threading.Thread(target=run_bot, daemon=True).start()
 
     port = int(os.environ.get("PORT", 10000))
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    app.run(host="0.0.0.0", port=port)
